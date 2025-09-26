@@ -1,0 +1,72 @@
+schema_version: "1.0"
+
+objects:
+  user:
+    relations: {}
+
+  group:
+    relations:
+      member:
+        subject_types: [user, group]
+
+  application:
+    relations:
+      administrator:
+        subject_types: [user]
+
+  project:
+    relations:
+      # Recursive inheritance
+      parent:
+        subject_types: [project, application]
+
+      # Direct positive relations
+      reader:
+        subject_types: [user, group]
+      reviewer:
+        subject_types: [user, group]
+      contributor:
+        subject_types: [user, group]
+      owner:
+        subject_types: [user, group]
+
+      # Negative relation: explicit denial
+      forbidden:
+        subject_types: [user, group]
+
+    permissions:
+      # View the project and its data: dashboards, results, reviews, cleaning policy, assigned SQO
+      read:
+        any_of: [administrator, owner, contributor, reviewer, reader]
+        except: [forbidden]
+      # Create a child project
+      create:
+        any_of: [administrator, owner, contributor]
+        except: [forbidden]
+      # Edit project details: name, info, labels, parent, assigned SQO, cleaning policy
+      edit:
+        any_of: [administrator, owner]
+        except: [forbidden]
+      # Delete the project with all related data, or delete a specific result
+      delete:
+        any_of: [administrator, owner]
+        except: [forbidden]
+
+      # Manage permissions on the project
+      manage_permissions:
+        any_of: [administrator, owner]
+        except: [forbidden]
+
+      # Import new results (from CLI or Desktop UI)
+      import_results:
+        any_of: [administrator, owner, contributor]
+        except: [forbidden]
+      # Export existing results (download, export, report)
+      export_results:
+        any_of: [administrator, owner, contributor, reviewer, reader]
+        except: [forbidden]
+
+      # Review results (write, import, or copy)
+      write_reviews:
+        any_of: [administrator, owner, contributor, reviewer]
+        except: [forbidden]
