@@ -1,10 +1,8 @@
 package authz
 
 import (
-	"bytes"
 	"encoding/json"
 	"fmt"
-	"io"
 	"log"
 	"net/http"
 	"strconv"
@@ -17,10 +15,11 @@ import (
 // Handler provides HTTP handlers for authz operations.
 type AuthzHandler struct {
 	authzService AuthzService
+	meta         Metadata
 }
 
-func NewAuthzHandler(authzService AuthzService) *AuthzHandler {
-	return &AuthzHandler{authzService: authzService}
+func NewAuthzHandler(authzService AuthzService, meta Metadata) *AuthzHandler {
+	return &AuthzHandler{authzService: authzService, meta: meta}
 }
 
 // CheckPermission handles GET /permissions/<permission>?resource=<type:id>&subject=<type:id>
@@ -31,28 +30,40 @@ func (h *AuthzHandler) CheckPermission() router.HandlerFunc {
 		// Get query parameter 'resource'
 		resource, err := parseObjectParam(params, "resource")
 		if err != nil {
-			write(w, http.StatusBadRequest, err.Error())
+			writeError(w, http.StatusBadRequest, err)
+			return
+		}
+		if err := h.meta.IsValidObject(*resource); err != nil {
+			writeError(w, http.StatusBadRequest, err)
 			return
 		}
 
 		// Get query parameter 'subject'
 		subject, err := parseObjectParam(params, "subject")
 		if err != nil {
-			write(w, http.StatusBadRequest, err.Error())
+			writeError(w, http.StatusBadRequest, err)
+			return
+		}
+		if err := h.meta.IsValidObject(*subject); err != nil {
+			writeError(w, http.StatusBadRequest, err)
 			return
 		}
 
 		// Get query parameter 'permission'
 		permission, err := parseStringParam(params, "permission")
 		if err != nil {
-			write(w, http.StatusBadRequest, err.Error())
+			writeError(w, http.StatusBadRequest, err)
+			return
+		}
+		if err := h.meta.IsValidPermission(*resource, permission); err != nil {
+			writeError(w, http.StatusBadRequest, err)
 			return
 		}
 
 		// Get query parameter 'show_matching_paths'
 		showMatchingPaths, err := parseBoolParam(params, "show_matching_paths")
 		if err != nil {
-			write(w, http.StatusBadRequest, err.Error())
+			writeError(w, http.StatusBadRequest, err)
 			return
 		}
 
@@ -67,7 +78,7 @@ func (h *AuthzHandler) CheckPermission() router.HandlerFunc {
 		permissionCheck, err := h.authzService.CheckPermissions(r.Context(), tRequest, showMatchingPaths)
 		if err != nil {
 			log.Printf("[ERROR] AuthzHandler.CheckPermission: s.CheckPermissions failed: %v", err)
-			write(w, http.StatusInternalServerError, err)
+			writeError(w, http.StatusInternalServerError, err)
 			return
 		}
 
@@ -86,41 +97,55 @@ func (h *AuthzHandler) CheckPermissions() router.HandlerFunc {
 		start := time.Now()
 
 		// Get query parameter 'resource_filter'
-		resourceFilter, err := parseObjectFilterParam(params, "resource_filter")
+		resourceFilter, err := parseObjectParam(params, "resource_filter")
 		if err != nil {
-			write(w, http.StatusBadRequest, err)
+			writeError(w, http.StatusBadRequest, err)
+			return
+		}
+		if err := h.meta.IsValidObjectType(*resourceFilter); err != nil {
+			writeError(w, http.StatusBadRequest, err)
 			return
 		}
 
 		// Get query parameter 'subject_filter'
-		subjectFilter, err := parseObjectFilterParam(params, "subject_filter")
+		subjectFilter, err := parseObjectParam(params, "subject_filter")
 		if err != nil {
-			write(w, http.StatusBadRequest, err)
+			writeError(w, http.StatusBadRequest, err)
+			return
+		}
+		if err := h.meta.IsValidObjectType(*subjectFilter); err != nil {
+			writeError(w, http.StatusBadRequest, err)
+			return
+		}
+		if resourceFilter.ID == "" && subjectFilter.ID == "" {
+			writeError(w, http.StatusBadRequest, fmt.Errorf("either a resource ID or a subject ID must be provided"))
 			return
 		}
 
 		// Get query parameter 'show_matching_paths'
 		showMatchingPaths, err := parseBoolParam(params, "show_matching_paths")
 		if err != nil {
-			write(w, http.StatusBadRequest, err)
+			writeError(w, http.StatusBadRequest, err)
 			return
 		}
 
 		var tRequest TraversalRequest
-		if resourceFilter.Type != "" && resourceFilter.ID != "" {
+		if resourceFilter.ID != "" {
 			tRequest.StartOn = *resourceFilter
 			tRequest.Forward = true
 
-			if subjectFilter.Type != "" && subjectFilter.ID != "" {
+			if subjectFilter.ID != "" {
 				tRequest.StopOn = subjectFilter
-			} else if subjectFilter.Type != "" {
+			} else {
 				tRequest.StopOnTypes = []string{subjectFilter.Type}
 			}
-		} else if subjectFilter.Type != "" && subjectFilter.ID != "" {
+		} else {
 			tRequest.StartOn = *subjectFilter
 			tRequest.Forward = false
 
-			if subjectFilter.Type != "" {
+			if resourceFilter.ID != "" {
+				tRequest.StopOn = resourceFilter
+			} else {
 				tRequest.StopOnTypes = []string{resourceFilter.Type}
 			}
 		}
@@ -129,7 +154,7 @@ func (h *AuthzHandler) CheckPermissions() router.HandlerFunc {
 		permissionEvals, err := h.authzService.CheckPermissions(r.Context(), tRequest, showMatchingPaths)
 		if err != nil {
 			log.Printf("[ERROR] AuthzHandler.CheckPermissions: s.CheckPermissions failed: %v", err)
-			write(w, http.StatusInternalServerError, err)
+			writeError(w, http.StatusInternalServerError, err)
 			return
 		}
 
@@ -147,7 +172,7 @@ func (h *AuthzHandler) ListResourceRelations() router.HandlerFunc {
 		// Get query parameter 'resource'
 		resource, err := parseObjectParam(params, "resource")
 		if err != nil {
-			write(w, http.StatusBadRequest, err)
+			writeError(w, http.StatusBadRequest, err)
 			return
 		}
 
@@ -162,7 +187,7 @@ func (h *AuthzHandler) ListResourceRelations() router.HandlerFunc {
 		tResponse, err := h.authzService.ListEffectivePaths(r.Context(), tRequest)
 		if err != nil {
 			log.Printf("[ERROR] AuthzHandler.ListResourceRelations: s.ListEffectivePaths failed: %v", err)
-			write(w, http.StatusInternalServerError, err)
+			writeError(w, http.StatusInternalServerError, err)
 			return
 		}
 
@@ -176,35 +201,36 @@ func (h *AuthzHandler) ListResourceRelations() router.HandlerFunc {
 func (h *AuthzHandler) ManageRelationships() router.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request, params map[string]string) {
 		// Decode JSON request body
-		req, err := parseRequestBody[map[string][]Relationship](r)
+		var req map[string][]Relationship
+		err := json.NewDecoder(r.Body).Decode(&req)
 		if err != nil {
-			write(w, http.StatusBadRequest, err)
+			writeError(w, http.StatusBadRequest, fmt.Errorf("invalid request body: %s", err))
 			return
 		}
 
-		// Execute all deletions
-		relationshipsToDelete, ok := (*req)["delete"]
-		if ok {
-			for _, rel := range relationshipsToDelete {
-				// Delete relationship
-				err = h.authzService.DeleteRelationship(r.Context(), rel.Resource, rel.Subject)
-				if err != nil {
-					write(w, http.StatusInternalServerError, err)
+		// Validate all creation/delete requests
+		for _, rels := range req {
+			for _, rel := range rels {
+				if err := h.meta.IsValidRelation(rel); err != nil {
+					writeError(w, http.StatusBadRequest, err)
 					return
 				}
 			}
 		}
 
+		// Execute all deletions
+		if relationshipsToDelete, ok := req["delete"]; ok {
+			if err := h.authzService.DeleteRelationships(r.Context(), relationshipsToDelete); err != nil {
+				writeError(w, http.StatusInternalServerError, err)
+				return
+			}
+		}
+
 		// Execute all creations
-		relationshipsToCreate, ok := (*req)["create"]
-		if ok {
-			for _, rel := range relationshipsToCreate {
-				// Create relationship
-				err = h.authzService.CreateRelationship(r.Context(), rel.Resource, rel.Subject, rel.Relation)
-				if err != nil {
-					write(w, http.StatusInternalServerError, err)
-					return
-				}
+		if relationshipsToCreate, ok := req["create"]; ok {
+			if err := h.authzService.CreateRelationships(r.Context(), relationshipsToCreate); err != nil {
+				writeError(w, http.StatusInternalServerError, err)
+				return
 			}
 		}
 
@@ -238,25 +264,9 @@ func parseBoolParam(params map[string]string, paramName string) (bool, error) {
 func parseObjectParam(params map[string]string, paramName string) (*Object, error) {
 	raw, ok := params[paramName]
 	if !ok || raw == "" {
-		return nil, fmt.Errorf("missing parameter '%s'", paramName)
+		return nil, fmt.Errorf("required parameter '%s'", paramName)
 	}
 
-	// Parse <type>:<id>
-	object_parts := strings.SplitN(raw, ":", 2)
-	if len(object_parts) != 2 {
-		return nil, fmt.Errorf("invalid parameter '%s': expected format <type>:<id>", paramName)
-	}
-
-	return &Object{Type: object_parts[0], ID: object_parts[1]}, nil
-}
-
-func parseObjectFilterParam(params map[string]string, paramName string) (*Object, error) {
-	raw, ok := params[paramName]
-	if !ok || raw == "" {
-		return nil, fmt.Errorf("missing parameter '%s'", paramName)
-	}
-
-	// Parse <type>[:<id>]
 	object_parts := strings.SplitN(raw, ":", 2)
 	object := &Object{Type: object_parts[0]}
 
@@ -267,30 +277,15 @@ func parseObjectFilterParam(params map[string]string, paramName string) (*Object
 	return object, nil
 }
 
-func parseRequestBody[T any](r *http.Request) (*T, error) {
-	// Read the body
-	bodyBytes, err := io.ReadAll(r.Body)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read request body")
-	}
-	r.Body.Close()
-
-	// Replace body so handler can read it again
-	r.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
-
-	// Unmarshal into map
-	var payload T
-	if err := json.Unmarshal(bodyBytes, &payload); err != nil {
-		return nil, fmt.Errorf("invalid request body")
-	}
-
-	return &payload, nil
-}
-
 func write(w http.ResponseWriter, statusCode int, payload interface{}) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(statusCode)
 	if payload != nil {
 		json.NewEncoder(w).Encode(payload)
 	}
+}
+
+func writeError(w http.ResponseWriter, statusCode int, err error) {
+	w.WriteHeader(statusCode)
+	w.Write([]byte(err.Error()))
 }

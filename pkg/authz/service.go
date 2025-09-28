@@ -3,77 +3,61 @@ package authz
 import (
 	"context"
 	_ "embed"
-	"fmt"
 
 	"github.com/romrossi/authz-rebac/pkg/db"
-	"gopkg.in/yaml.v3"
 )
 
-// Service defines the interface for Authz business logic operations.
+// AuthzService defines the business logic for authorization operations.
 type AuthzService interface {
+	// CheckPermissions evaluates permissions for a given traversal request.
 	CheckPermissions(ctx context.Context, request TraversalRequest, showMatchingPaths bool) ([]PermissionCheckItem, error)
-	CreateRelationship(ctx context.Context, resource Object, subject Object, relationLabel string) error
-	DeleteRelationship(ctx context.Context, resource Object, subject Object) error
+
+	// CreateRelationship inserts multiple relationships.
+	CreateRelationships(ctx context.Context, relationships []Relationship) error
+
+	// DeleteRelationship removes multiple relationships.
+	DeleteRelationships(ctx context.Context, relationships []Relationship) error
+
+	// ListEffectivePaths returns all effective paths discovered during traversal,
+	// reduced according to precedence rules.
 	ListEffectivePaths(ctx context.Context, request TraversalRequest) ([]TraversalResponseItem, error)
 }
 
-// serviceImpl is an implementation of the Authz Service.
+// serviceImpl implements AuthzService.
 type serviceImpl struct {
-	authzRepo     AuthzRepository
-	authzMetadata Metadata
+	authzRepo AuthzRepository
+	meta      Metadata
 }
 
-//go:embed schema.yaml
-var Schema []byte
-
-// NewService creates a new instance of serviceImpl.
-func NewService(authzRepo AuthzRepository) AuthzService {
-	authzMetadata, err := LoadMetadata(Schema)
-	if err != nil {
-		panic(fmt.Sprintf("failed to load authz metadata: %v", err))
-	}
-
-	return &serviceImpl{authzRepo: authzRepo, authzMetadata: *authzMetadata}
+// NewService constructs a new AuthzService backed by the given repository.
+func NewService(authzRepo AuthzRepository, meta Metadata) AuthzService {
+	return &serviceImpl{authzRepo: authzRepo, meta: meta}
 }
 
-func LoadMetadata(data []byte) (*Metadata, error) {
-	var meta Metadata
-	if err := yaml.Unmarshal(data, &meta); err != nil {
-		return nil, err
-	}
-
-	return &meta, nil
-}
-
-func (s *serviceImpl) CreateRelationship(ctx context.Context, resource Object, subject Object, relation string) error {
+// CreateRelationship inserts relationships into the repository within a transaction.
+func (s *serviceImpl) CreateRelationships(ctx context.Context, relationships []Relationship) error {
 	return db.WithTransaction(ctx, func(txCtx context.Context) error {
-
-		// Insert or update Relationship in DB
-		return s.authzRepo.Insert(ctx, Relationship{
-			Resource: resource,
-			Subject:  subject,
-			Relation: relation,
-		})
+		return s.authzRepo.InsertBulk(txCtx, relationships)
 	})
 }
 
-func (s *serviceImpl) DeleteRelationship(ctx context.Context, resource Object, subject Object) error {
-	return db.WithTransaction(ctx, func(ctx context.Context) error {
-
-		// Delete Relationship
-		return s.authzRepo.Delete(ctx, resource, subject)
+// DeleteRelationship removes a relationships from the repository within a transaction.
+func (s *serviceImpl) DeleteRelationships(ctx context.Context, relationships []Relationship) error {
+	return db.WithTransaction(ctx, func(txCtx context.Context) error {
+		return s.authzRepo.DeleteBulk(txCtx, relationships)
 	})
 }
 
-// CheckPermissions evaluates permissions for a given TraversalRequest.
+// CheckPermissions evaluates permissions for each resource-subject pair
+// discovered by traversing relationships from the given request.
 func (s *serviceImpl) CheckPermissions(
 	ctx context.Context,
-	tRequest TraversalRequest,
+	request TraversalRequest,
 	showMatchingPaths bool,
 ) ([]PermissionCheckItem, error) {
 
-	// Step 1: Get effective paths according to precedence rules
-	tResponse, err := s.ListEffectivePaths(ctx, tRequest)
+	// Step 1: Resolve effective paths according to precedence rules
+	tResponse, err := s.ListEffectivePaths(ctx, request)
 	if err != nil {
 		return nil, err
 	}
@@ -87,92 +71,87 @@ func (s *serviceImpl) CheckPermissions(
 			PermissionEvals: s.evaluateAllPermissions(item.Resource, item.Paths, showMatchingPaths),
 		})
 	}
-
 	return results, nil
 }
 
-// evaluateAllPermissions evaluates all defined permissions for a given resource and set of paths.
+// evaluateAllPermissions evaluates all permissions defined for a resource type.
 func (s *serviceImpl) evaluateAllPermissions(
 	resource Object,
 	paths [][]Relationship,
 	showMatchingPaths bool,
 ) map[string]PermissionEval {
 
-	perms := s.authzMetadata.Objects[resource.Type].Permissions
+	perms := s.meta.Objects[resource.Type].Permissions
 	evals := make(map[string]PermissionEval, len(perms))
 
-	for permName, permDef := range perms {
-		evals[permName] = s.evaluatePermission(permDef, paths, showMatchingPaths)
+	for name, def := range perms {
+		evals[name] = s.evaluatePermission(def, paths, showMatchingPaths)
 	}
-
 	return evals
 }
 
-// evaluatePermission determines if a single permission is allowed based on the paths and definition.
-// If showMatchingPaths is true, all matching paths are included; otherwise, the first match returns immediately.
+// evaluatePermission checks whether a single permission is allowed,
+// based on the given traversal paths and permission definition.
+//
+// Rules:
+//  1. If any path contains an excluded relation (Except), deny immediately.
+//  2. If any path contains an allowed relation (AnyOf), grant permission.
+//     - If showMatchingPaths is true, collect all matching paths.
+//     - Otherwise, return after the first match.
 func (s *serviceImpl) evaluatePermission(
 	permission PermissionDefinition,
 	paths [][]Relationship,
 	showMatchingPaths bool,
 ) PermissionEval {
 
-	eval := PermissionEval{
-		Allowed: false,
-	}
+	eval := PermissionEval{Allowed: false}
 
-	// Step 1: Deny if any path contains an excluded relation
+	// Rule 1: deny if any excluded relation is found
 	for _, except := range permission.Except {
 		for _, path := range paths {
 			if pathContains(path, except) {
-				// Forbidden → immediately return
 				return eval
 			}
 		}
 	}
 
-	// Step 2: Allow if any path contains an allowed relation
+	// Rule 2: allow if any required relation is found
 	for _, anyOf := range permission.AnyOf {
 		for _, path := range paths {
 			if pathContains(path, anyOf) {
 				eval.Allowed = true
-
 				if showMatchingPaths {
 					eval.MatchingPaths = append(eval.MatchingPaths, path)
 				} else {
-					// No need to keep paths → return immediately
-					return eval
+					return eval // return early if paths are not needed
 				}
 			}
 		}
 	}
 
-	// If showMatchingPaths is true, MatchingPaths may be empty (JSON omits it via `omitempty`)
 	return eval
 }
 
-// ListEffectivePaths returns the traversal response items with only the effective paths
-// after applying precedence rules. Precedence rules (in order) are:
+// ListEffectivePaths reduces all traversal paths by applying precedence rules:
 //  1. Paths containing "administrator" take precedence over those without.
 //  2. Paths without "member" take precedence over those with "member".
-//  3. Paths with fewer "parent" relationships (closer in hierarchy) take precedence.
+//  3. Paths with fewer "parent" relations take precedence (closer in hierarchy).
 //
-// If multiple paths are equally effective according to these rules, all are kept.
-func (s *serviceImpl) ListEffectivePaths(ctx context.Context, tRequest TraversalRequest) ([]TraversalResponseItem, error) {
-	tResponse, err := s.authzRepo.ListPaths(ctx, tRequest)
+// If multiple paths are equally effective, all are kept.
+func (s *serviceImpl) ListEffectivePaths(ctx context.Context, request TraversalRequest) ([]TraversalResponseItem, error) {
+	tResponse, err := s.authzRepo.ListPaths(ctx, request)
 	if err != nil {
 		return nil, err
 	}
 
-	// Apply precedence rules to each response item
 	for i := range tResponse {
 		tResponse[i].Paths = effectivePaths(tResponse[i].Paths)
 	}
-
 	return tResponse, nil
 }
 
-// effectivePaths filters a list of paths and returns only the effective ones
-// based on the precedence rules described above.
+// effectivePaths filters paths down to only the most effective ones
+// according to the precedence rules defined in compare.
 func effectivePaths(paths [][]Relationship) [][]Relationship {
 	if len(paths) == 0 {
 		return nil
@@ -180,46 +159,49 @@ func effectivePaths(paths [][]Relationship) [][]Relationship {
 
 	effective := [][]Relationship{paths[0]}
 	for _, p := range paths[1:] {
-		cmp := compare(p, effective[0])
-		if cmp < 0 {
-			effective = [][]Relationship{p} // found a more effective path → reset
-		} else if cmp == 0 {
-			effective = append(effective, p) // equally effective → keep
+		switch cmp := compare(p, effective[0]); {
+		case cmp < 0:
+			effective = [][]Relationship{p} // found a better path -> reset
+		case cmp == 0:
+			effective = append(effective, p) // equally effective -> keep
 		}
 	}
 	return effective
 }
 
-// compare returns negative if a < b (a is more effective), 0 if equal, positive if a > b
+// compare returns:
+//   - negative if a is more effective than b
+//   - zero if equally effective
+//   - positive if a is less effective than b
 func compare(a, b []Relationship) int {
-	// Rule 1: administrator takes precedence
+	// Rule 1: administrator relation takes precedence
 	aHasAdmin, bHasAdmin := pathContains(a, "administrator"), pathContains(b, "administrator")
 	if aHasAdmin != bHasAdmin {
 		if aHasAdmin {
-			return -1 // a has administrator → better
+			return -1 // a is better
 		}
-		return 1 // b has administrator → better
+		return 1 // b is better
 	}
 
-	// Rule 2: prefer paths without member
+	// Rule 2: prefer paths without "member"
 	aHasMember, bHasMember := pathContains(a, "member"), pathContains(b, "member")
 	if aHasMember != bHasMember {
 		if !aHasMember {
-			return -1 // a has no member → better
+			return -1 // a is better
 		}
-		return 1 // b has no member → better
+		return 1 // b is better
 	}
 
-	// Rule 3: fewer parent relationships → closer in hierarchy
+	// Rule 3: fewer "parent" relations is better
 	aParents, bParents := pathCount(a, "parent"), pathCount(b, "parent")
 	if aParents != bParents {
-		return aParents - bParents // fewer parents is better
+		return aParents - bParents
 	}
 
-	// equally effective
-	return 0
+	return 0 // equally effective
 }
 
+// pathContains reports whether the path includes a relation with the given label.
 func pathContains(path []Relationship, relation string) bool {
 	for _, r := range path {
 		if r.Relation == relation {
@@ -229,6 +211,7 @@ func pathContains(path []Relationship, relation string) bool {
 	return false
 }
 
+// pathCount returns the number of times a relation appears in the path.
 func pathCount(path []Relationship, relation string) int {
 	count := 0
 	for _, r := range path {

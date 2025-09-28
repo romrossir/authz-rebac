@@ -28,10 +28,11 @@ func main() {
 	// Setup DB connection
 	db.Connect(dbHost, dbPort, dbName, dbUser, dbPassword)
 
-	// Initialize Authz repo, service, handler
+	// Initialize Authz metadata, repo, service, handler
+	meta := authz.LoadMetadata()
 	authzRepo := authz.NewPGRepository()
-	authzService := authz.NewService(authzRepo)
-	authzHandler := authz.NewAuthzHandler(authzService)
+	authzService := authz.NewService(authzRepo, meta)
+	authzHandler := authz.NewAuthzHandler(authzService, meta)
 
 	// Initialize HTTP router
 	v1Prefix := "/api/v1"

@@ -2,7 +2,6 @@ package authz
 
 import (
 	"encoding/json"
-	"fmt"
 	"strings"
 )
 
@@ -25,12 +24,10 @@ func (o *Object) UnmarshalJSON(data []byte) error {
 	}
 
 	parts := strings.SplitN(s, ":", 2)
-	if len(parts) != 2 {
-		return fmt.Errorf("invalid object format: %q", s)
-	}
-
 	o.Type = parts[0]
-	o.ID = parts[1]
+	if len(parts) > 1 {
+		o.ID = parts[1]
+	}
 
 	return nil
 }

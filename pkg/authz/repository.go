@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"github.com/lib/pq"
 	"github.com/romrossi/authz-rebac/pkg/db"
@@ -11,8 +12,8 @@ import (
 
 // AuthzRepository defines the interface for authorization-related database operations.
 type AuthzRepository interface {
-	Insert(ctx context.Context, relationship Relationship) error
-	Delete(ctx context.Context, resource Object, subject Object) error
+	InsertBulk(ctx context.Context, relationship []Relationship) error
+	DeleteBulk(ctx context.Context, relationship []Relationship) error
 	ListPaths(ctx context.Context, request TraversalRequest) ([]TraversalResponseItem, error)
 }
 
@@ -24,35 +25,79 @@ func NewPGRepository() AuthzRepository {
 	return &pgRepository{}
 }
 
-// Insert creates a relationship into the database.
-func (r *pgRepository) Insert(ctx context.Context, relationship Relationship) error {
+// InsertBulk inserts multiple relationships into the database in one query.
+func (r *pgRepository) InsertBulk(ctx context.Context, relationships []Relationship) error {
+	if len(relationships) == 0 {
+		return nil // nothing to insert
+	}
+
+	// Build query dynamically
 	query := `
         INSERT INTO relationship (resource_id, resource_type, subject_id, subject_type, relation)
-        VALUES ($1, $2, $3, $4, $5)
-        ON CONFLICT DO NOTHING
+        VALUES 
     `
-	_, err := db.GetStatement(ctx).ExecContext(ctx, query,
-		relationship.Resource.ID,
-		relationship.Resource.Type,
-		relationship.Subject.ID,
-		relationship.Subject.Type,
-		relationship.Relation,
-	)
+
+	// placeholders for each row: ($1, $2, $3, $4, $5), ($6, $7, $8, $9, $10), ...
+	values := make([]interface{}, 0, len(relationships)*5)
+	placeholders := make([]string, 0, len(relationships))
+
+	for i, rel := range relationships {
+		n := i*5 + 1
+		placeholders = append(placeholders,
+			fmt.Sprintf("($%d, $%d, $%d, $%d, $%d)", n, n+1, n+2, n+3, n+4),
+		)
+		values = append(values,
+			rel.Resource.ID,
+			rel.Resource.Type,
+			rel.Subject.ID,
+			rel.Subject.Type,
+			rel.Relation,
+		)
+	}
+
+	query += strings.Join(placeholders, ",")
+	query += " ON CONFLICT DO NOTHING"
+
+	_, err := db.GetStatement(ctx).ExecContext(ctx, query, values...)
 	if err != nil {
-		return fmt.Errorf("insert relationship failed: %w", err)
+		return fmt.Errorf("bulk insert relationships failed: %w", err)
 	}
 	return nil
 }
 
-// Delete removes a relationship from the database by resource and subject.
-func (r *pgRepository) Delete(ctx context.Context, resource Object, subject Object) error {
+// DeleteBulk removes multiple relationships from the database in one query.
+func (r *pgRepository) DeleteBulk(ctx context.Context, relationships []Relationship) error {
+	if len(relationships) == 0 {
+		return nil // nothing to delete
+	}
+
 	query := `
-		DELETE FROM relationship
-		WHERE resource_id = $1 AND resource_type = $2 AND subject_id = $3 AND subject_type = $4
-	`
-	_, err := db.GetStatement(ctx).ExecContext(ctx, query, resource.ID, resource.Type, subject.ID, subject.Type)
+        DELETE FROM relationship
+        WHERE (resource_id, resource_type, subject_id, subject_type, relation) IN (
+    `
+
+	placeholders := make([]string, 0, len(relationships))
+	values := make([]interface{}, 0, len(relationships)*5)
+
+	for i, rel := range relationships {
+		n := i*5 + 1
+		placeholders = append(placeholders,
+			fmt.Sprintf("($%d, $%d, $%d, $%d, $%d)", n, n+1, n+2, n+3, n+4),
+		)
+		values = append(values,
+			rel.Resource.ID,
+			rel.Resource.Type,
+			rel.Subject.ID,
+			rel.Subject.Type,
+			rel.Relation,
+		)
+	}
+
+	query += strings.Join(placeholders, ",") + ")"
+
+	_, err := db.GetStatement(ctx).ExecContext(ctx, query, values...)
 	if err != nil {
-		return fmt.Errorf("delete relationship failed: %w", err)
+		return fmt.Errorf("bulk delete relationships failed: %w", err)
 	}
 	return nil
 }
