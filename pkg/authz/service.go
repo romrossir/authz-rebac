@@ -18,6 +18,9 @@ type AuthzService interface {
 	// DeleteRelationship removes multiple relationships.
 	DeleteRelationships(ctx context.Context, relationships []Relationship) error
 
+	// ListRelationships retrieves all relationships of a resource.
+	ListRelationships(ctx context.Context, object Object) ([]Relationship, error)
+
 	// ListEffectivePaths returns all effective paths discovered during traversal,
 	// reduced according to precedence rules.
 	ListEffectivePaths(ctx context.Context, request TraversalRequest) ([]TraversalResponseItem, error)
@@ -46,6 +49,11 @@ func (s *serviceImpl) DeleteRelationships(ctx context.Context, relationships []R
 	return db.WithTransaction(ctx, func(txCtx context.Context) error {
 		return s.authzRepo.DeleteBulk(txCtx, relationships)
 	})
+}
+
+// ListRelationships retrieves all relationships from the repository of a resource from the repository.
+func (s *serviceImpl) ListRelationships(ctx context.Context, object Object) ([]Relationship, error) {
+	return s.authzRepo.ListRelationships(ctx, object)
 }
 
 // CheckPermissions evaluates permissions for each resource-subject pair

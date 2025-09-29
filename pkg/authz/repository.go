@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/lib/pq"
 	"github.com/romrossi/authz-rebac/pkg/db"
 )
 
@@ -14,6 +13,7 @@ import (
 type AuthzRepository interface {
 	InsertBulk(ctx context.Context, relationship []Relationship) error
 	DeleteBulk(ctx context.Context, relationship []Relationship) error
+	ListRelationships(ctx context.Context, object Object) ([]Relationship, error)
 	ListPaths(ctx context.Context, request TraversalRequest) ([]TraversalResponseItem, error)
 }
 
@@ -23,6 +23,47 @@ type pgRepository struct{}
 // NewPGRepository creates a new pgRepository instance.
 func NewPGRepository() AuthzRepository {
 	return &pgRepository{}
+}
+
+// ListRelationships reads relationships of a resource and recursively its parents in one query.
+func (r *pgRepository) ListRelationships(ctx context.Context, object Object) ([]Relationship, error) {
+	query := `
+        WITH RECURSIVE ancestor AS (
+            SELECT resource_type, resource_id, subject_type, subject_id, relation
+            FROM relationship
+            WHERE resource_type = $1
+			  AND resource_id = $2
+
+            UNION
+
+            SELECT r.resource_type, r.resource_id, r.subject_type, r.subject_id, r.relation
+            FROM relationship r
+            JOIN ancestor a 
+			  ON r.resource_type = a.subject_type
+			 AND r.resource_id = a.subject_id
+            WHERE a.relation = 'parent'
+        )
+        SELECT resource_type, resource_id, subject_type, subject_id, relation
+		FROM ancestor
+		WHERE relation != 'parent'
+    `
+
+	// Execute query
+	rows, err := db.GetStatement(ctx).QueryContext(ctx, query, object.Type, object.ID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var rels []Relationship
+	for rows.Next() {
+		var rel Relationship
+		if err := rows.Scan(&rel.Resource.ID, &rel.Resource.Type, &rel.Subject.Type, &rel.Subject.ID, &rel.Relation); err != nil {
+			return nil, err
+		}
+		rels = append(rels, rel)
+	}
+	return rels, rows.Err()
 }
 
 // InsertBulk inserts multiple relationships into the database in one query.
@@ -116,7 +157,7 @@ func (r *pgRepository) ListPaths(ctx context.Context, tRequest TraversalRequest)
 				json_build_array(
 					json_build_object(
 						'resource', r.resource_type || ':' || r.resource_id,
-						'subject', r.subject_type || ':' || r.subject_id,
+						'subject',  r.subject_type || ':' || r.subject_id,
 						'relation', r.relation
 					)
 				)::jsonb AS path
@@ -133,14 +174,13 @@ func (r *pgRepository) ListPaths(ctx context.Context, tRequest TraversalRequest)
 				r.%[2]s_id   AS next_id,
 				t.path || json_build_object(
 					'resource', r.resource_type || ':' || r.resource_id,
-					'subject', r.subject_type || ':' || r.subject_id,
+					'subject',  r.subject_type || ':' || r.subject_id,
 					'relation', r.relation
 				)::jsonb
 			FROM relationship r
 			JOIN rel_tree t
-			ON r.%[1]s_id = t.next_id
-			AND r.%[1]s_type = t.next_type
-			WHERE ($3::text[] IS NULL OR NOT (t.next_type = ANY($3::text[])))
+			  ON r.%[1]s_id = t.next_id
+			 AND r.%[1]s_type = t.next_type
 		)
 		SELECT
 			start_type,
@@ -148,13 +188,13 @@ func (r *pgRepository) ListPaths(ctx context.Context, tRequest TraversalRequest)
 			next_type,
 			next_id,
 			json_agg(path)
-		FROM rel_tree
-		WHERE (($4 = '' AND $5 = '') OR (next_type = $4 AND next_id = $5))
-		AND ($3::text[] IS NULL OR next_type = ANY($3::text[]))
+		FROM rel_tree r
+		WHERE r.next_type = $3
+		  AND ($4 = '' OR r.next_id = $4)
 		GROUP BY start_type, start_id, next_type, next_id
 	`
 
-	// Prepare query depending on traversal direction
+	// Direction-dependent placeholders
 	var query string
 	if tRequest.Forward {
 		query = fmt.Sprintf(sqlTemplate, "resource", "subject")
@@ -162,27 +202,19 @@ func (r *pgRepository) ListPaths(ctx context.Context, tRequest TraversalRequest)
 		query = fmt.Sprintf(sqlTemplate, "subject", "resource")
 	}
 
-	// Prepare args
-	args := []any{tRequest.StartOn.Type, tRequest.StartOn.ID, pq.Array(tRequest.StopOnTypes)}
-	stopType, stopID := "", ""
-	if tRequest.StopOn != nil {
-		stopType = tRequest.StopOn.Type
-		stopID = tRequest.StopOn.ID
-	}
-	args = append(args, stopType, stopID)
-
 	// Execute query
-	// start := time.Now()
-	rows, err := db.GetStatement(ctx).QueryContext(ctx, query, args...)
+	rows, err := db.GetStatement(ctx).QueryContext(
+		ctx, query,
+		tRequest.StartOn.Type, tRequest.StartOn.ID,
+		tRequest.StopOn.Type, tRequest.StopOn.ID,
+	)
 	if err != nil {
 		return nil, err
 	}
-	// duration := time.Since(start)
-	// log.Printf("Query executed in %v", duration)
 	defer rows.Close()
 
 	// Build response
-	response := make([]TraversalResponseItem, 0)
+	var response []TraversalResponseItem
 	for rows.Next() {
 		var start, stop Object
 		var rawPaths []byte

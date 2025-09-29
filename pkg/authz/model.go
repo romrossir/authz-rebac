@@ -50,13 +50,9 @@ type TraversalRequest struct {
 	// false: traverse against relation direction (subject → resource)
 	Forward bool
 
-	// StopOnTypes specifies node types at which traversal should stop.
-	// All paths ending at nodes of these types will be returned.
-	StopOnTypes []string
-
-	// StopOn specifies an exact node to stop traversal.
-	// Only paths reaching this specific node will be returned.
-	StopOn *Object
+	// StopOn is the stopping object for the traversal.
+	// May be "type" (stop on all of that type) or "type:id".
+	StopOn Object
 }
 
 // TraversalResponseItem contains all discovered paths for a specific resource-subject pair.

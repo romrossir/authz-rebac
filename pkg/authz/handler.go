@@ -67,11 +67,11 @@ func (h *AuthzHandler) CheckPermission() router.HandlerFunc {
 			return
 		}
 
-		// Build traversal request from request parameters
+		// Build traversal request
 		tRequest := TraversalRequest{
 			StartOn: *resource,
 			Forward: true,
-			StopOn:  subject,
+			StopOn:  *subject,
 		}
 
 		// Check single permission
@@ -129,25 +129,19 @@ func (h *AuthzHandler) CheckPermissions() router.HandlerFunc {
 			return
 		}
 
+		// Build traversal request
+		// Rules for performance:
+		// - If resource filter is specific (type:id), traverse forward (resource → subject).
+		// - If subject filters is specific (type:id), traverse backward (subject → resource).
 		var tRequest TraversalRequest
 		if resourceFilter.ID != "" {
 			tRequest.StartOn = *resourceFilter
 			tRequest.Forward = true
-
-			if subjectFilter.ID != "" {
-				tRequest.StopOn = subjectFilter
-			} else {
-				tRequest.StopOnTypes = []string{subjectFilter.Type}
-			}
+			tRequest.StopOn = *subjectFilter
 		} else {
 			tRequest.StartOn = *subjectFilter
 			tRequest.Forward = false
-
-			if resourceFilter.ID != "" {
-				tRequest.StopOn = resourceFilter
-			} else {
-				tRequest.StopOnTypes = []string{resourceFilter.Type}
-			}
+			tRequest.StopOn = *resourceFilter
 		}
 
 		// Check permissions
@@ -176,24 +170,17 @@ func (h *AuthzHandler) ListResourceRelations() router.HandlerFunc {
 			return
 		}
 
-		// Build traversal request
-		tRequest := TraversalRequest{
-			StartOn:     *resource,
-			Forward:     true,
-			StopOnTypes: []string{"user", "group"},
-		}
-
-		// List paths between the resource and all users/groups
-		tResponse, err := h.authzService.ListEffectivePaths(r.Context(), tRequest)
+		// Get all relationships of the resource and all its parents
+		relationships, err := h.authzService.ListRelationships(r.Context(), *resource)
 		if err != nil {
-			log.Printf("[ERROR] AuthzHandler.ListResourceRelations: s.ListEffectivePaths failed: %v", err)
+			log.Printf("[ERROR] AuthzHandler.ListResourceRelations: s.ListRelationships failed: %v", err)
 			writeError(w, http.StatusInternalServerError, err)
 			return
 		}
 
 		// Build OK response
 		log.Printf("[INFO] AuthzHandler.ListResourceRelations: executed in %v", time.Since(start))
-		write(w, http.StatusOK, tResponse)
+		write(w, http.StatusOK, relationships)
 	}
 }
 

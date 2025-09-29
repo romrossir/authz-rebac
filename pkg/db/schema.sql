@@ -13,3 +13,5 @@ CREATE TABLE IF NOT EXISTS authz.relationship (
 );
 CREATE INDEX IF NOT EXISTS idx_relationship_subject ON authz.relationship(subject_type, subject_id);
 CREATE INDEX IF NOT EXISTS idx_relationship_resource ON authz.relationship(resource_type, resource_id);
+CREATE INDEX IF NOT EXISTS idx_relationship_subject_type ON authz.relationship(subject_type);
+CREATE INDEX IF NOT EXISTS idx_relationship_resource_type ON authz.relationship(resource_type);
