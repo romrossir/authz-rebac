@@ -27,8 +27,9 @@ type Metadata struct {
 
 // ObjectDefinition defines the relations and permissions for a given object type.
 type ObjectDefinition struct {
-	Relations   map[string]RelationDefinition   `yaml:"relations"`
-	Permissions map[string]PermissionDefinition `yaml:"permissions"`
+	Relations       map[string]RelationDefinition   `yaml:"relations"`
+	Permissions     map[string]PermissionDefinition `yaml:"permissions"`
+	PrecedenceRules []PrecedenceRule                `yaml:"precedence_rules"`
 }
 
 // RelationDefinition defines the allowed subject types for a specific relation.
@@ -40,6 +41,17 @@ type RelationDefinition struct {
 type PermissionDefinition struct {
 	AnyOf  []string `yaml:"any_of"`
 	Except []string `yaml:"except"`
+}
+
+// PrecedenceRule defines how to rank traversal paths when multiple valid paths exist between a subject and a resource.
+// Rules are applied in order, and the first rule that differentiates two paths determines which path is more effective.
+// Supported rules:
+//   - "path_with": prefer paths that contain the given relation.
+//   - "path_without": prefer paths that do NOT contain the given relation.
+//   - "path_with_fewer": prefer paths that contain fewer occurrences of the given relation (e.g., closer in hierarchy).
+type PrecedenceRule struct {
+	Rule     string
+	Relation string
 }
 
 // IsValidObject checks that the object is non-empty and its type exists in metadata.

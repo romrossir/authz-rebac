@@ -140,34 +140,35 @@ func (s *serviceImpl) evaluatePermission(
 	return eval
 }
 
-// ListEffectivePaths reduces all traversal paths by applying precedence rules:
-//  1. Paths containing "administrator" take precedence over those without.
-//  2. Paths without "member" take precedence over those with "member".
-//  3. Paths with fewer "parent" relations take precedence (closer in hierarchy).
-//
+// ListEffectivePaths reduces all traversal paths by applying precedence rules (see schema.yaml)
 // If multiple paths are equally effective, all are kept.
 func (s *serviceImpl) ListEffectivePaths(ctx context.Context, request TraversalRequest) ([]TraversalResponseItem, error) {
+	// Get all paths
 	tResponse, err := s.authzRepo.ListPaths(ctx, request)
 	if err != nil {
 		return nil, err
 	}
 
+	// Get precedence rules from metadata
+	precedenceRules := s.meta.Objects[request.StartOn.Type].PrecedenceRules
+
+	// apply precedence rules to keep only effective paths
 	for i := range tResponse {
-		tResponse[i].Paths = effectivePaths(tResponse[i].Paths)
+		tResponse[i].Paths = effectivePaths(tResponse[i].Paths, precedenceRules)
 	}
 	return tResponse, nil
 }
 
 // effectivePaths filters paths down to only the most effective ones
 // according to the precedence rules defined in compare.
-func effectivePaths(paths [][]Relationship) [][]Relationship {
+func effectivePaths(paths [][]Relationship, rules []PrecedenceRule) [][]Relationship {
 	if len(paths) == 0 {
 		return nil
 	}
 
 	effective := [][]Relationship{paths[0]}
 	for _, p := range paths[1:] {
-		switch cmp := compare(p, effective[0]); {
+		switch cmp := compare(p, effective[0], rules); {
 		case cmp < 0:
 			effective = [][]Relationship{p} // found a better path -> reset
 		case cmp == 0:
@@ -181,32 +182,33 @@ func effectivePaths(paths [][]Relationship) [][]Relationship {
 //   - negative if a is more effective than b
 //   - zero if equally effective
 //   - positive if a is less effective than b
-func compare(a, b []Relationship) int {
-	// Rule 1: administrator relation takes precedence
-	aHasAdmin, bHasAdmin := pathContains(a, "administrator"), pathContains(b, "administrator")
-	if aHasAdmin != bHasAdmin {
-		if aHasAdmin {
-			return -1 // a is better
+func compare(a, b []Relationship, rules []PrecedenceRule) int {
+	for _, rule := range rules {
+		switch rule.Rule {
+		case "path_with":
+			aHas, bHas := pathContains(a, rule.Relation), pathContains(b, rule.Relation)
+			if aHas != bHas {
+				if aHas {
+					return -1
+				}
+				return 1
+			}
+		case "path_without":
+			aHas, bHas := pathContains(a, rule.Relation), pathContains(b, rule.Relation)
+			if aHas != bHas {
+				if !aHas {
+					return -1
+				}
+				return 1
+			}
+		case "path_with_fewer":
+			aCount, bCount := pathCount(a, rule.Relation), pathCount(b, rule.Relation)
+			if aCount != bCount {
+				return aCount - bCount
+			}
 		}
-		return 1 // b is better
 	}
-
-	// Rule 2: prefer paths without "member"
-	aHasMember, bHasMember := pathContains(a, "member"), pathContains(b, "member")
-	if aHasMember != bHasMember {
-		if !aHasMember {
-			return -1 // a is better
-		}
-		return 1 // b is better
-	}
-
-	// Rule 3: fewer "parent" relations is better
-	aParents, bParents := pathCount(a, "parent"), pathCount(b, "parent")
-	if aParents != bParents {
-		return aParents - bParents
-	}
-
-	return 0 // equally effective
+	return 0 // equally effective if all rules exhausted
 }
 
 // pathContains reports whether the path includes a relation with the given label.

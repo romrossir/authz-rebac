@@ -34,6 +34,18 @@ objects:
       forbidden:
         subject_types: [user, group]
 
+    # Precedence rules:
+    #  1. Paths containing "administrator" take precedence over those without.
+    #  2. Paths without "member" take precedence over those with "member".
+    #  3. Paths with fewer "parent" relations take precedence (closer in hierarchy).
+    precedence_rules:
+      - rule: path_with
+        relation: administrator
+      - rule: path_without
+        relation: member
+      - rule: path_with_fewer
+        relation: parent
+
     permissions:
       # View the project and its data: dashboards, results, reviews, cleaning policy, assigned SQO
       read:
